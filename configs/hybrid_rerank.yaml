@@ -1,0 +1,35 @@
+# Experiment C -- hybrid retrieval, then cross-encoder reranking.
+# top_n is the recall ceiling: the reranker can only reorder what hybrid surfaced.
+name: hybrid_rerank
+
+chunking:
+  size: 512
+  overlap: 64
+  min_tokens: 80
+
+embedding:
+  model: BAAI/bge-small-en-v1.5
+  batch_size: 32
+
+retrieval:
+  strategy: hybrid_rerank
+  k: 10
+  candidates:
+    dense: 50
+    sparse: 50
+  fusion:
+    method: rrf
+    k: 60
+  reranker:
+    # ~2.8s/query for 50 candidates on this CPU.
+    model: cross-encoder/ms-marco-MiniLM-L6-v2
+    top_n: 50
+    max_length: 512
+
+generation:
+  provider: ollama
+  model: qwen3:4b
+  context_chunks: 5
+  temperature: 0.0
+  seed: 42
+  num_ctx: 4096

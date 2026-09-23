@@ -1,0 +1,10 @@
+{"query_id": "q0001", "question": "What is multi-head attention and why is it used instead of single-head attention?"}
+{"query_id": "q0002", "question": "How many layers are in the Transformer encoder stack?"}
+{"query_id": "q0003", "question": "What is scaled dot-product attention?"}
+{"query_id": "q0004", "question": "Why does the Transformer use positional encoding?"}
+{"query_id": "q0005", "question": "What hardware was the Transformer trained on?"}
+{"query_id": "q0006", "question": "What is the masked language model pre-training objective in BERT?"}
+{"query_id": "q0007", "question": "What corpora was BERT pre-trained on?"}
+{"query_id": "q0008", "question": "How does BERT differ from a left-to-right language model?"}
+{"query_id": "q0009", "question": "What is the next sentence prediction task?"}
+{"query_id": "q0010", "question": "What is the capital city of Bolivia?"}

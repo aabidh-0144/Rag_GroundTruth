@@ -1,0 +1,24 @@
+# --- Ingestion -------------------------------------------------------------
+pymupdf4llm>=0.0.17
+pymupdf>=1.24.0
+
+# --- Embeddings / reranking (CPU) -----------------------------------------
+# torch CPU wheel is pulled from the index-url pinned in requirements-torch.txt
+sentence-transformers>=3.0.0
+transformers>=4.44.0
+
+# --- Stores ----------------------------------------------------------------
+chromadb>=0.5.0
+rank-bm25>=0.2.2
+
+# --- Core ------------------------------------------------------------------
+# Makes Python's TLS use the OS certificate store. Required on corporate networks
+# that perform TLS inspection, where certifi's bundle lacks the proxy's root CA and
+# every huggingface.co model download fails with CERTIFICATE_VERIFY_FAILED.
+truststore>=0.10
+numpy>=1.26
+pyyaml>=6.0
+requests>=2.31
+
+# --- Dev -------------------------------------------------------------------
+pytest>=8.0

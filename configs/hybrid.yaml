@@ -1,0 +1,29 @@
+# Experiment B -- hybrid retrieval: BM25 + dense, fused with Reciprocal Rank Fusion.
+name: hybrid
+
+chunking:
+  size: 512
+  overlap: 64
+  min_tokens: 80
+
+embedding:
+  model: BAAI/bge-small-en-v1.5
+  batch_size: 32
+
+retrieval:
+  strategy: hybrid
+  k: 10
+  candidates:
+    dense: 50
+    sparse: 50
+  fusion:
+    method: rrf
+    k: 60
+
+generation:
+  provider: ollama
+  model: qwen3:4b
+  context_chunks: 5
+  temperature: 0.0
+  seed: 42
+  num_ctx: 4096
