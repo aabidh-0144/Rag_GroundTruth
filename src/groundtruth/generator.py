@@ -12,6 +12,7 @@ Two prompt decisions matter for the evaluation that comes later:
 
 from __future__ import annotations
 
+import re
 import time
 
 import requests
@@ -93,6 +94,10 @@ class OllamaGenerator:
                 },
             ],
             "stream": False,
+            # Top-level, not under "options" - this is where Ollama's chat API expects
+            # the reasoning switch for hybrid-thinking models (qwen3, deepseek-r1, ...).
+            # Older Ollama builds that predate this field simply ignore it.
+            "think": self.cfg.think,
             "options": {
                 "temperature": self.cfg.temperature,
                 "seed": self.cfg.seed,
@@ -108,8 +113,19 @@ class OllamaGenerator:
             try:
                 response = requests.post(self.url, json=payload, timeout=self.cfg.timeout_s)
                 response.raise_for_status()
-                content = response.json()["message"]["content"].strip()
-                return _strip_thinking(content)
+                content = response.json()["message"]["content"]
+                answer = _strip_thinking(content)
+                if not answer:
+                    # The whole response was reasoning with no visible answer after it -
+                    # almost always num_predict was hit while the model was still inside
+                    # <think>, so the closing tag (and the real answer) never arrived.
+                    raise RuntimeError(
+                        "Model produced no answer after removing its reasoning trace "
+                        f"(num_predict={self.cfg.num_predict}). It likely hit the token "
+                        "limit while still 'thinking'. Raise generation.num_predict, or "
+                        "confirm generation.think is false, in your config."
+                    )
+                return answer
             except requests.RequestException as exc:
                 last_error = exc
                 if attempt < self.cfg.max_retries:
@@ -118,16 +134,25 @@ class OllamaGenerator:
         raise RuntimeError(f"Ollama generation failed after retries: {last_error}")
 
 
+_THINK_BLOCK_RE = re.compile(r"<think>.*?</think>", re.DOTALL | re.IGNORECASE)
+_THINK_OPEN_RE = re.compile(r"<think>", re.IGNORECASE)
+
+
 def _strip_thinking(text: str) -> str:
     """Remove <think>...</think> blocks emitted by reasoning models such as qwen3.
 
     The reasoning trace is not the answer; leaving it in would let a faithfulness
     judge score the model's scratchpad.
-    """
-    import re
 
-    cleaned = re.sub(r"<think>.*?</think>", "", text, flags=re.DOTALL).strip()
-    return cleaned or text.strip()
+    A closed block is simply cut out. An *unterminated* `<think>` - the model was
+    still reasoning when `num_predict` cut generation off - is treated the same way:
+    everything from `<think>` onward is discarded rather than surfaced as if it were
+    the answer. That deliberately makes `generate()` see an empty string in that case
+    (checked by the caller) instead of dumping a half-finished scratchpad on the user.
+    """
+    cleaned = _THINK_BLOCK_RE.sub("", text)
+    cleaned = _THINK_OPEN_RE.split(cleaned, maxsplit=1)[0]
+    return cleaned.strip()
 
 
 def build_generator(cfg: GenerationConfig) -> OllamaGenerator:

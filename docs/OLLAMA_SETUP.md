@@ -159,7 +159,7 @@ it.
 
 If local inference simply isn't going to happen, Groq and Google Gemini both have free tiers that
 are more than adequate for this project. This needs a small code change —
-see [§7](#7-using-a-different-provider).
+see [§8](#8-using-a-different-provider).
 
 Tradeoff: faster and easier, but adds a network dependency to your measurement loop and free-tier
 models can be deprecated, which weakens long-term reproducibility.
@@ -184,9 +184,14 @@ POST http://localhost:11434/api/chat
     {"role": "user",   "content": "Context:\n[1] ...\n\nQuestion: ...\n\nAnswer:"}
   ],
   "stream": false,
-  "options": {"temperature": 0.0, "seed": 42, "num_ctx": 4096, "num_predict": 512}
+  "think": false,
+  "options": {"temperature": 0.0, "seed": 42, "num_ctx": 4096, "num_predict": 1024}
 }
 ```
+
+`think` is a **top-level** field, not part of `options` — it's Ollama's switch for disabling the
+`<think>...</think>` reasoning scratchpad on hybrid-reasoning models (qwen3, deepseek-r1, and
+similar). It defaults to `false` here on purpose: see [§7](#7-a-real-failure-generation-that-silently-produces-nothing) for why.
 
 The `generation` block present in all four config files:
 
@@ -200,13 +205,14 @@ generation:
   num_ctx: 4096         # context window
 ```
 
-Four more settings exist with sensible defaults and are simply omitted from the YAML. Add any of
-them to a config to override:
+More settings exist with sensible defaults and are simply omitted from the YAML. Add any of them
+to a config to override:
 
 | Setting | Default | Purpose |
 |---|---|---|
 | `base_url` | `http://localhost:11434` | Where Ollama is listening |
-| `num_predict` | `512` | Max answer length in tokens |
+| `num_predict` | `1024` | Max tokens generated, **including any reasoning trace** |
+| `think` | `false` | Disable the reasoning scratchpad on models that support it |
 | `timeout_s` | `180` | Per-request timeout |
 | `max_retries` | `2` | Retries on a connection failure, with backoff |
 
@@ -315,13 +321,57 @@ re-indexing. It *is* part of `config_fingerprint`, so runs stay distinguishable.
 
 ### About `<think>` blocks
 
-Reasoning models like qwen3 emit `<think>...</think>` scratchpads. These are stripped
-automatically in `_strip_thinking()` — the scratchpad is not the answer, and leaving it in would
-let a faithfulness judge grade the model's rough working.
+Reasoning models like qwen3 emit `<think>...</think>` scratchpads before writing the visible
+answer. These are stripped automatically in `_strip_thinking()` — the scratchpad is not the
+answer, and leaving it in would let a faithfulness judge grade the model's rough working.
+
+By default (`generation.think: false`) the scratchpad is disabled at the source, which is both
+faster and safer — see the next section for why "safer" matters here.
 
 ---
 
-## 7. Using a different provider
+## 7. A real failure: generation that silently produces nothing
+
+This happened during setup and is worth understanding, because the symptom looks exactly like
+"generation is broken" when the real cause is a token budget.
+
+**What went wrong:** `qwen3` writes `<think>...reasoning...</think>` before its actual answer.
+That reasoning counts against `num_predict` — originally capped at 512 tokens here. If the model
+was still inside `<think>` when it hit that cap, generation stopped **before the visible answer
+was ever written**, and the closing `</think>` tag never arrived. The original stripper only knew
+how to remove a *closed* block, so an unterminated one passed straight through — the user got a
+wall of raw reasoning (or nothing useful) instead of an answer, with retrieval working perfectly
+the whole time.
+
+**The fix, two layers:**
+
+1. **`think: false`** is now sent as a top-level field on every request, so Ollama skips the
+   scratchpad entirely on models that support the switch. No reasoning tokens are spent, so
+   there's nothing to truncate mid-thought.
+2. **`_strip_thinking()` no longer requires a closing tag.** An unterminated `<think>` is treated
+   the same as a closed one: everything from the tag onward is discarded. If that leaves nothing,
+   `generate()` raises a clear error naming `num_predict` as the likely cause, instead of quietly
+   returning an empty string or a reasoning dump.
+3. **`num_predict` was also raised, 512 → 1024**, as a safety net for any model or Ollama version
+   that ignores `think`.
+
+**If you still hit this** (an older Ollama build that doesn't support `think`, or a different
+reasoning model):
+
+```
+RuntimeError: Model produced no answer after removing its reasoning trace
+(num_predict=1024). It likely hit the token limit while still 'thinking'.
+Raise generation.num_predict, or confirm generation.think is false, in your config.
+```
+
+- Confirm your Ollama version supports `think` (`ollama --version`; the feature ships in
+  reasonably recent builds). If not, raising `num_predict` further (e.g. `2048`) is the fallback.
+- Check `results.jsonl` for this run — the query's `error` field will hold this exact message, and
+  the batch continues past it rather than aborting.
+
+---
+
+## 8. Using a different provider
 
 `build_generator()` currently accepts only `provider: ollama`:
 
@@ -375,7 +425,13 @@ Worth fixing before Phase 3 — a generator that ignores context makes faithfuln
 meaningless.
 
 ### Answers are truncated mid-sentence
-Raise `num_predict` (default 512 tokens).
+Raise `num_predict` (default 1024 tokens).
+
+### `RuntimeError: Model produced no answer after removing its reasoning trace`
+See [§7](#7-a-real-failure-generation-that-silently-produces-nothing) — the model hit
+`num_predict` while still inside a `<think>` block and never wrote a visible answer. Confirm
+`generation.think` is `false` (the default) and that your Ollama version supports it; if not,
+raise `num_predict` further.
 
 ### Very slow first generation, fast afterwards
 Normal. Ollama loads the model into RAM on first use and keeps it warm for ~5 minutes. Batch runs

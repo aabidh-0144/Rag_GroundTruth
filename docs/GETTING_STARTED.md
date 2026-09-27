@@ -156,7 +156,7 @@ Expect:
 
 ```
 ...................................................................  [100%]
-71 passed in 0.19s
+75 passed in 0.20s
 ```
 
 These use fake tokenizers and stub retrievers — no models downloaded, no network needed.

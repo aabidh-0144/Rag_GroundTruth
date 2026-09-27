@@ -619,9 +619,24 @@ otherwise look identical:
 Without an explicit refusal path, both show up as "wrong answer" and the two questions this
 project exists to answer become indistinguishable.
 
-**Reasoning traces are stripped.** Models like qwen3 emit `<think>...</think>` scratchpads. That
-is not the answer, and leaving it in would let a faithfulness judge grade the model's rough
-working.
+**Reasoning traces are stripped — and, critically, disabled at the source.** Models like qwen3
+are hybrid-reasoning: before writing the visible answer, they emit a `<think>...</think>`
+scratchpad, and that scratchpad counts against `num_predict`. Left unmanaged, a model that is
+still "thinking" when it hits the token cap never writes an answer at all — the closing `</think>`
+never arrives, and a naive stripper would surface the raw half-finished reasoning dump as if it
+were the answer.
+
+Two defences, applied together:
+
+1. `generation.think: false` (default) is sent as a top-level field on every `/api/chat` request,
+   telling Ollama to skip the scratchpad on models that support the switch.
+2. `_strip_thinking()` treats an **unterminated** `<think>` the same as a closed one — everything
+   from the tag onward is discarded, not surfaced. If that leaves nothing, `generate()` raises a
+   clear error naming `num_predict` as the likely cause, rather than silently returning an empty
+   or reasoning-filled string.
+
+`num_predict` is also raised to 1024 (from an original 512) as a safety net for any provider that
+ignores `think`.
 
 Generation is decoupled from retrieval: `context_chunks` (how many chunks enter the prompt,
 default 5) is independent of retrieval `k` (default 10).
@@ -803,7 +818,7 @@ this quality-vs-latency tradeoff is one of the things this framework exists to d
 
 Two complementary layers — deliberately split.
 
-### Unit tests — `pytest` · 71 tests · <1 second
+### Unit tests — `pytest` · 75 tests · <1 second
 
 Fast and hermetic. A **fake whitespace tokenizer** and **stub retrievers** mean no model
 downloads and no index on disk. These test *logic*: span arithmetic, boundary conditions, fusion
@@ -814,7 +829,7 @@ maths, prompt construction.
 | `test_chunking.py` | Char-span round-trip, ID determinism, size limits, merging, sections |
 | `test_retrievers.py` | RRF against hand-computed values, ranking, tie-breaks, config integrity |
 | `test_ingest.py` | Header detection, reference stripping, offset integrity, slugify |
-| `test_generator.py` | Prompt structure, refusal path, retries, `<think>` stripping (Ollama stubbed) |
+| `test_generator.py` | Prompt structure, refusal path, retries, `think` flag, truncated-reasoning handling (Ollama stubbed) |
 
 **The most important single test:**
 

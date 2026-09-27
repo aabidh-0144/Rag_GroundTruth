@@ -84,7 +84,14 @@ class GenerationConfig:
     temperature: float = 0.0
     seed: int = 42
     num_ctx: int = 4096
-    num_predict: int = 512
+    # qwen3 and other hybrid-reasoning models spend part of this budget on a
+    # <think>...</think> scratchpad before writing the visible answer. 512 was
+    # tight enough that the model could hit the cap mid-thought and never emit an
+    # answer at all. `think=False` below disables that scratchpad on models that
+    # support the switch; num_predict is raised regardless as a safety net for
+    # models that ignore it.
+    num_predict: int = 1024
+    think: bool = False
     timeout_s: int = 180
     max_retries: int = 2
 

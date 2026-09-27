@@ -106,6 +106,34 @@ def test_generate_sends_deterministic_options(monkeypatch):
     assert captured["stream"] is False
 
 
+def test_generate_sends_think_as_a_top_level_field(monkeypatch):
+    """Ollama's chat API expects the reasoning switch at the top level, not under options."""
+    captured: dict = {}
+
+    def fake_post(url, json=None, timeout=None):
+        captured.update(json)
+        return FakeResponse({"message": {"content": "ok"}})
+
+    monkeypatch.setattr(requests, "post", fake_post)
+    OllamaGenerator(GenerationConfig(think=False)).generate("q?", make_chunks())
+
+    assert captured["think"] is False
+    assert "think" not in captured["options"]
+
+
+def test_generate_raises_when_the_model_only_thinks(monkeypatch):
+    """The bug this guards against: qwen3 hits num_predict mid-<think> and never
+    writes a visible answer. That must surface as a clear, actionable error, not an
+    empty string or a raw reasoning dump silently treated as the answer."""
+    truncated = "<think>Reasoning that never reaches a conclusion because the token"
+    monkeypatch.setattr(
+        requests, "post", lambda *a, **k: FakeResponse({"message": {"content": truncated}})
+    )
+
+    with pytest.raises(RuntimeError, match="num_predict"):
+        OllamaGenerator(GenerationConfig(num_predict=64)).generate("q?", make_chunks())
+
+
 def test_generate_sends_system_and_user_messages(monkeypatch):
     captured: dict = {}
 
@@ -169,9 +197,29 @@ def test_text_without_thinking_is_unchanged():
     assert _strip_thinking("A plain answer [1].") == "A plain answer [1]."
 
 
-def test_answer_that_is_only_a_thinking_block_is_not_emptied():
-    """Better to surface the raw output than to silently return an empty answer."""
-    assert _strip_thinking("<think>only thinking</think>") != ""
+def test_answer_that_is_only_a_thinking_block_is_emptied():
+    """A closed block with nothing after it means the model never wrote an answer.
+
+    `generate()` treats an empty result as a hard error rather than silently
+    returning the reasoning trace as if it were the answer.
+    """
+    assert _strip_thinking("<think>only thinking</think>") == ""
+
+
+def test_unterminated_thinking_block_is_discarded_not_surfaced():
+    """The actual bug this guards against: num_predict cuts generation off mid-<think>.
+
+    The closing tag never arrives, so a naive strip leaves the raw reasoning dump in
+    place of the answer. Everything from the unterminated <think> onward must be
+    discarded instead.
+    """
+    truncated = "<think>Let me work through this step by step, first considering"
+    assert _strip_thinking(truncated) == ""
+
+
+def test_unterminated_thinking_block_after_real_text_only_drops_the_fragment():
+    text = "Partial answer before reasoning got cut off. <think>now reasoning forever"
+    assert _strip_thinking(text) == "Partial answer before reasoning got cut off."
 
 
 # --- health check ----------------------------------------------------------
