@@ -22,4 +22,21 @@ def _use_system_certificates() -> None:
         pass
 
 
+def _load_dotenv() -> None:
+    """Load a local `.env` (see `.env.example`) into the environment, if present.
+
+    This is how `GROQ_API_KEY` and the optional `GROUNDTRUTH_GENERATION_PROVIDER`
+    switch (see config.py) reach the process without the user having to `set`/
+    `export` them by hand every session. Best-effort: a missing `.env`, or a missing
+    `python-dotenv`, changes nothing rather than failing import.
+    """
+    try:
+        from dotenv import load_dotenv
+
+        load_dotenv()
+    except Exception:
+        pass
+
+
 _use_system_certificates()
+_load_dotenv()

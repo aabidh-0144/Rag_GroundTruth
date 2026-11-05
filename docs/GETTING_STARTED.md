@@ -6,8 +6,9 @@ Step-by-step, from an empty machine to a working RAG system with experiment resu
 **Prerequisites:** Python 3.11+ and ~3 GB free disk.
 
 > For *what* the system does and *why*, read [`ARCHITECTURE.md`](ARCHITECTURE.md).
-> For answer generation, read [`OLLAMA_SETUP.md`](OLLAMA_SETUP.md) — **not required** for
-> retrieval, which is the bulk of the system.
+> For answer generation (both Ollama and Groq, in depth), read
+> [`OLLAMA_SETUP.md`](OLLAMA_SETUP.md) — **not required** for retrieval, which is the bulk of the
+> system. Step 12 below covers just enough to get a first answer out of either one.
 
 ---
 
@@ -29,9 +30,13 @@ python -m venv .venv
 .\.venv\Scripts\python.exe -m groundtruth.cli chunk --config configs\hybrid.yaml
 .\.venv\Scripts\python.exe -m groundtruth.cli index --config configs\hybrid.yaml
 .\.venv\Scripts\python.exe -m groundtruth.cli ask "your question" --config configs\hybrid.yaml --no-generate
+
+# for a written answer too (Groq: copy .env.example to .env and fill it in;
+# Ollama: ollama pull qwen3:4b) - then drop --no-generate:
+.\.venv\Scripts\python.exe -m groundtruth.cli ask "your question" --config configs\hybrid.yaml
 ```
 
-Everything below explains those steps in detail.
+Everything below explains those steps in detail — generation specifically in Step 12.
 
 ---
 
@@ -156,7 +161,7 @@ Expect:
 
 ```
 ...................................................................  [100%]
-75 passed in 0.20s
+87 passed in 0.20s
 ```
 
 These use fake tokenizers and stub retrievers — no models downloaded, no network needed.
@@ -272,9 +277,81 @@ what proves they're comparing against the same index.
 
 ---
 
-## Step 12 — Ask a question
+## Step 12 — Enable answer generation (optional): Ollama, Groq, or neither
 
-This is your main debugging tool.
+Retrieval (Steps 9–11) never needs this — `--no-generate` on any command skips it entirely.
+This step is only for turning retrieved chunks into a written answer.
+
+**Both providers are already wired into the code.** Nothing here is a code change — it's just
+picking which one answers your questions, via `.env`. Every config file on disk
+(`configs/*.yaml`) still says `provider: ollama` and is never edited by either path below.
+
+### Option A — Groq (free API, fastest to get running, needs internet)
+
+```powershell
+copy .env.example .env
+notepad .env
+```
+
+In the file that opens:
+
+1. Paste a key from <https://console.groq.com/keys> onto the `GROQ_API_KEY=` line.
+2. Uncomment (remove the leading `#` from) these two lines:
+   ```dotenv
+   GROUNDTRUTH_GENERATION_PROVIDER=groq
+   GROUNDTRUTH_GENERATION_MODEL=qwen/qwen3.8-27b
+   ```
+3. Save and close.
+
+That's it — every command in a **new** terminal now uses Groq. `.env` is only read once, at
+process start, so a terminal that was already open won't pick up the change; open a fresh one.
+
+`qwen/qwen3.8-27b` is a verified-working free-tier default (fast, cites correctly, clean output —
+see `.env.example` for how it was checked and for two alternates). Groq's free-tier catalog does
+change over time; if this model ever stops working, `.env.example` shows how to list what your
+own key can currently see.
+
+### Option B — Ollama (fully local, no internet needed once installed)
+
+Full walkthrough: [`OLLAMA_SETUP.md`](OLLAMA_SETUP.md). Short version:
+
+1. Install from <https://ollama.com/download/windows>.
+2. `ollama pull qwen3:4b` (~2.6 GB).
+3. Confirm it's running: `ollama list`.
+
+No `.env` changes needed — Ollama is the default already.
+
+### Option C — Neither
+
+Keep using `--no-generate` on every command. Retrieval, experiments, and the results table all
+work fully without a generator; this is only needed for Phase 3 (faithfulness/relevance scoring).
+
+### Verify whichever you picked
+
+```powershell
+.\.venv\Scripts\python.exe -m groundtruth.cli ask "What is multi-head attention?" --config configs\hybrid.yaml
+```
+
+**No `--no-generate` this time** — that flag is what was suppressing generation in every earlier
+step. Whichever provider is active in `.env` (or Ollama, if you left `.env` alone) answers this.
+You should see a `=== answer ===` section citing block numbers like `[1]`, `[2]`.
+
+Then test the refusal path — the one that proves grounding is actually working, not just that a
+model responded:
+
+```powershell
+.\.venv\Scripts\python.exe -m groundtruth.cli ask "What is the capital city of Bolivia?" --config configs\hybrid.yaml
+```
+
+Expect exactly `INSUFFICIENT_CONTEXT`. If you get a real (wrong) answer instead, the model is
+using its own knowledge instead of your documents — see the troubleshooting section in
+[`OLLAMA_SETUP.md`](OLLAMA_SETUP.md).
+
+---
+
+## Step 13 — Ask a question
+
+This is your main debugging tool, generation aside.
 
 ```powershell
 .\.venv\Scripts\python.exe -m groundtruth.cli ask "What is multi-head attention?" --config configs\hybrid.yaml --no-generate
@@ -301,9 +378,9 @@ This is your main debugging tool.
 
 | Flag | Purpose |
 |---|---|
-| `--no-generate` | Retrieval only. **Use this until Ollama is set up.** |
+| `--no-generate` | Retrieval only, regardless of what's in `.env`. **Use this if you haven't done Step 12.** |
 | `--warmup` | Preload models first, so timings reflect steady state rather than including model loading |
-| `--config` | Which strategy to use |
+| `--config` | Which retrieval strategy to use |
 
 ### Try the different strategies
 
@@ -321,9 +398,12 @@ This is your main debugging tool.
 **A good test of hybrid:** ask about a rare exact term — an author name, a dataset name, a metric.
 Dense retrieval often misses these entirely; hybrid should catch them.
 
+Drop `--no-generate` from any of these once Step 12 is done, and you'll get a written answer too
+— from Ollama or Groq, whichever `.env` currently points at.
+
 ---
 
-## Step 13 — Batch run: produce experiment results
+## Step 14 — Batch run: produce experiment results
 
 ```powershell
 .\.venv\Scripts\python.exe -m groundtruth.cli run --config configs\hybrid.yaml --queries data\sample_queries.jsonl --no-generate
@@ -377,7 +457,7 @@ Different fingerprints = different indexes = invalid comparison.
 
 ---
 
-## Step 14 — Run the smoke test
+## Step 15 — Run the smoke test
 
 End-to-end verification against real models and indexes (unlike the unit tests, which use fakes).
 
@@ -393,6 +473,13 @@ all checks passed
 ```
 
 Run this after any change to chunking, indexing or retrieval.
+
+Add `--generate` to also exercise whichever generator is currently active (Ollama or Groq, per
+`.env`) — health check, a real answer, and the refusal path:
+
+```powershell
+.\.venv\Scripts\python.exe scripts\smoke.py --config configs\hybrid.yaml --generate
+```
 
 ---
 
@@ -451,8 +538,13 @@ Expected. Models download once (~260 MB total) and load in 40–130 s. Subsequen
 Use `--warmup` when you care about accurate timings.
 
 ### `warning: generation disabled - Ollama not reachable`
-Expected if you haven't set up Ollama. Retrieval works fine — use `--no-generate` to silence it.
-See [`OLLAMA_SETUP.md`](OLLAMA_SETUP.md).
+Expected if you haven't done Step 12 (or picked Option C there). Retrieval works fine — use
+`--no-generate` to silence it, or set up Ollama or Groq per Step 12.
+
+### `GROQ_API_KEY is not set` / `GROUNDTRUTH_GENERATION_PROVIDER=groq` seems ignored
+`.env` is only read once, when the Python process starts. If you edited `.env` in a terminal
+that's already open, close it and open a new one. See [`OLLAMA_SETUP.md`](OLLAMA_SETUP.md)'s
+troubleshooting section for the rest of the Groq-specific errors (401, 429, unknown model).
 
 ### A paper produced suspiciously few chunks
 Likely a scanned/image PDF with no extractable text. Check:
@@ -471,6 +563,7 @@ Near-empty text means you need OCR before this pipeline can use it.
    `index`.
 2. **Explore retrieval quality** with `ask`. Try questions you know the answers to, and compare
    `dense` against `hybrid` on rare exact terms.
-3. **Optionally set up Ollama** for answer generation — [`OLLAMA_SETUP.md`](OLLAMA_SETUP.md).
+3. **Optionally enable generation** — Step 12 above, or the full [`OLLAMA_SETUP.md`](OLLAMA_SETUP.md)
+   for depth on either Ollama or Groq.
 4. **Move to Phase 2** — building the golden dataset, which is what turns this from a RAG system
    into an evaluation framework.

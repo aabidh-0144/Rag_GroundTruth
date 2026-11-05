@@ -161,16 +161,16 @@ Rag_GroundTruth/
 │       └── manifest.json
 │
 ├── src/groundtruth/            ⭐ THE CODE
-│   ├── __init__.py       (25)  Package init + truststore TLS fix
+│   ├── __init__.py       (42)  Package init + truststore TLS fix + .env loading
 │   ├── schemas.py       (142)  Core data types + chunk ID function
-│   ├── config.py        (151)  Config dataclasses, YAML loading, fingerprints
+│   ├── config.py        (191)  Config dataclasses, YAML loading, fingerprints, env overrides
 │   ├── ingest.py        (183)  PDF → Document
 │   ├── chunking.py      (339)  Document → Chunks  ← most complex file
 │   ├── embedder.py       (75)  Text → vectors (bge wrapper)
 │   ├── index.py         (167)  Chunks → Chroma + BM25
-│   ├── generator.py     (138)  Context → answer (Ollama client + prompt)
+│   ├── generator.py     (327)  Context → answer (Ollama + Groq clients + shared prompt)
 │   ├── pipeline.py      (180)  End-to-end orchestration, run artifacts
-│   ├── cli.py           (179)  Command-line interface
+│   ├── cli.py           (192)  Command-line interface
 │   │
 │   ├── retrievers/             ⭐ ONE FILE PER STRATEGY
 │   │   ├── __init__.py   (51)  Factory: config → retriever
@@ -189,12 +189,13 @@ Rag_GroundTruth/
 │   ├── test_chunking.py (179)  ⭐ Includes the char-span invariant test
 │   ├── test_retrievers.py(214) RRF maths, ranking, config integrity
 │   ├── test_ingest.py   (135)  Boilerplate/reference stripping
-│   └── test_generator.py(218)  Prompt building, refusal, retries (Ollama stubbed)
+│   └── test_generator.py(413)  Prompt building, refusal, retries, env override (Ollama and Groq stubbed at the HTTP boundary)
 │
 ├── scripts/
 │   └── smoke.py         (167)  End-to-end check against REAL models and indexes
 │
 ├── docs/                       You are here
+├── .env.example                Template for .env — GROQ_API_KEY + provider switch (gitignored: .env)
 ├── requirements-torch.txt      CPU-only torch (install first!)
 ├── requirements.txt            Everything else
 └── pyproject.toml              Package metadata
@@ -573,10 +574,15 @@ query twice returns a byte-identical ranking.
 
 ### 4.6 Generation — context → answer
 
-**File:** `src/groundtruth/generator.py` · **Status:** written and unit-tested, not yet run
-against a live model (see [`OLLAMA_SETUP.md`](OLLAMA_SETUP.md))
+**File:** `src/groundtruth/generator.py` · **Two providers**, one shared prompt: `OllamaGenerator`
+(local, CPU) and `GroqGenerator` (free-tier hosted API, verified end-to-end — see
+[`OLLAMA_SETUP.md`](OLLAMA_SETUP.md) §8). Both implement a small `Generator` protocol, the same
+"one interface, many implementations" pattern the retrievers use. Switching between them is an
+environment variable (`GROUNDTRUTH_GENERATION_PROVIDER`, see `.env.example`), never a code change
+and never an edit to any experiment config.
 
-**Client:** Ollama HTTP `POST /api/chat` at `localhost:11434`.
+**Client:** Ollama HTTP `POST /api/chat` at `localhost:11434` (or Groq's OpenAI-compatible
+`POST /chat/completions`, when `provider: groq`).
 
 **Determinism settings** — `temperature=0`, fixed `seed`, explicit `num_ctx=4096`. Reproducibility
 is the entire point of a regression framework: same config + same corpus must give the same
@@ -818,7 +824,7 @@ this quality-vs-latency tradeoff is one of the things this framework exists to d
 
 Two complementary layers — deliberately split.
 
-### Unit tests — `pytest` · 75 tests · <1 second
+### Unit tests — `pytest` · 87 tests · <1 second
 
 Fast and hermetic. A **fake whitespace tokenizer** and **stub retrievers** mean no model
 downloads and no index on disk. These test *logic*: span arithmetic, boundary conditions, fusion
@@ -829,7 +835,7 @@ maths, prompt construction.
 | `test_chunking.py` | Char-span round-trip, ID determinism, size limits, merging, sections |
 | `test_retrievers.py` | RRF against hand-computed values, ranking, tie-breaks, config integrity |
 | `test_ingest.py` | Header detection, reference stripping, offset integrity, slugify |
-| `test_generator.py` | Prompt structure, refusal path, retries, `think` flag, truncated-reasoning handling (Ollama stubbed) |
+| `test_generator.py` | Prompt structure, refusal path, retries, `think` flag, truncated-reasoning handling (Ollama and Groq stubbed at the HTTP boundary) |
 
 **The most important single test:**
 
@@ -878,8 +884,16 @@ because labels point at character spans. Map each label to whichever new chunk o
 
 ### Add a generation provider
 
-`build_generator()` in `generator.py` currently accepts only `provider: ollama`. Add a branch
-and a client class exposing `generate()` and `health_check()`.
+Two are already implemented — `OllamaGenerator` and `GroqGenerator` in `generator.py`, both
+behind a `Generator` protocol (same pattern as `Retriever`). Switch between them per-run via
+`.env` (`GROUNDTRUTH_GENERATION_PROVIDER=groq`) without editing any config file — see
+`.env.example` and `OLLAMA_SETUP.md` §7.
+
+To add a third: write a class exposing the same `generate()` / `health_check()` methods, reusing
+the shared `SYSTEM_PROMPT`, `USER_TEMPLATE`, `format_context()` and `_strip_thinking()` so the
+prompt stays identical across providers, then add one branch in `build_generator()`. Read any API
+key from an environment variable inside the class itself — never store it on `GenerationConfig`,
+which gets serialised into every run's `config.yaml`.
 
 ---
 
@@ -893,6 +907,7 @@ and a client class exposing `generate()` and `health_check()`.
 | `chromadb` | Vector store |
 | `rank-bm25` | Lexical index |
 | `truststore` | OS certificate store — required on TLS-inspecting corporate networks |
+| `python-dotenv` | Loads `.env` (`GROQ_API_KEY`, provider switch) — see `.env.example` |
 | `numpy`, `pyyaml`, `requests` | Core |
 | `pytest` | Tests |
 

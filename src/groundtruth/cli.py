@@ -15,11 +15,24 @@ import argparse
 import sys
 from pathlib import Path
 
-from groundtruth.config import CHUNKS_PATH, ROOT, Config, load_config
+from groundtruth.config import (
+    CHUNKS_PATH,
+    ROOT,
+    Config,
+    apply_generation_env_overrides,
+    load_config,
+)
 
 
 def _load(config_path: str | None) -> Config:
-    return load_config(config_path) if config_path else Config()
+    if config_path:
+        return load_config(config_path)
+    # No --config at all still uses the bare defaults, but must go through the same
+    # env-override hook as load_config() does, or GROUNDTRUTH_GENERATION_PROVIDER=groq
+    # would silently do nothing in this one code path.
+    cfg = Config()
+    apply_generation_env_overrides(cfg)
+    return cfg
 
 
 def cmd_ingest(args: argparse.Namespace) -> int:

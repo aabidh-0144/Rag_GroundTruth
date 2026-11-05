@@ -1,6 +1,7 @@
 # Ollama Setup — Enabling Answer Generation
 
-How to install Ollama, pick a model, and wire it into the RAG pipeline.
+How to install Ollama, pick a model, and wire it into the RAG pipeline. Also covers **Groq**
+(§8) — a free-tier hosted alternative, useful when Ollama isn't an option on a given machine.
 
 > **Retrieval does not need this.** Steps 1–13 of [`GETTING_STARTED.md`](GETTING_STARTED.md) work
 > fully without Ollama — just pass `--no-generate`. This document covers the generation half:
@@ -25,11 +26,13 @@ Download request status is not success.
 
 PyPI, Hugging Face and arXiv are all reachable — it's specifically GitHub release binaries.
 
-**Consequence:** `src/groundtruth/generator.py` is written and covered by 19 unit tests, but has
-never been run against a live model. Expect to iterate on the prompt once you can actually
-execute it.
+**Consequence on this machine specifically:** `OllamaGenerator` is written and unit-tested but has
+never been run against a live Ollama model here. **`GroqGenerator` has** — it's been verified
+end-to-end against Groq's real API (health check, a live 401 against a bad key) — so Groq is the
+practical way to test generation from this machine while Ollama stays blocked. See
+[§8](#8-using-groq-instead-of-or-alongside-ollama).
 
-[Jump to workarounds →](#option-b-network-blocked-workarounds)
+[Jump to Ollama workarounds →](#option-b-network-blocked-workarounds)
 
 ---
 
@@ -159,7 +162,7 @@ it.
 
 If local inference simply isn't going to happen, Groq and Google Gemini both have free tiers that
 are more than adequate for this project. This needs a small code change —
-see [§8](#8-using-a-different-provider).
+see [§8](#8-using-groq-instead-of-or-alongside-ollama).
 
 Tradeoff: faster and easier, but adds a network dependency to your measurement loop and free-tier
 models can be deprecated, which weakens long-term reproducibility.
@@ -371,30 +374,107 @@ Raise generation.num_predict, or confirm generation.think is false, in your conf
 
 ---
 
-## 8. Using a different provider
+## 8. Using Groq instead of (or alongside) Ollama
 
-`build_generator()` currently accepts only `provider: ollama`:
+Groq hosts open models (Llama, and others) on custom inference hardware and offers a free tier —
+useful if a laptop can't run Ollama, or you just want faster iteration than CPU inference allows.
+It's implemented as a second `Generator`, side by side with Ollama, and switching between them
+never requires editing `configs/*.yaml`.
 
-```python
-def build_generator(cfg: GenerationConfig) -> OllamaGenerator:
-    if cfg.provider != "ollama":
-        raise ValueError(f"Unsupported generation provider {cfg.provider!r}. Only 'ollama' is implemented.")
-    return OllamaGenerator(cfg)
+### 8.1 Get an API key
+
+1. Sign up at <https://console.groq.com>.
+2. Create a key at <https://console.groq.com/keys>.
+3. Copy `.env.example` to `.env` in the project root and paste it in:
+
+   ```powershell
+   copy .env.example .env
+   ```
+
+   ```dotenv
+   GROQ_API_KEY=gsk_your_actual_key_here
+   ```
+
+`.env` is gitignored — it is never committed. `.env.example` (which **is** committed) has no real
+key in it, only the variable name.
+
+The key is loaded automatically: `src/groundtruth/__init__.py` calls `load_dotenv()` (via
+`python-dotenv`) on import, so every CLI command picks it up with no extra setup.
+
+### 8.2 Switch the provider
+
+Every checked-in config still says `provider: ollama` — that stays the default, on disk,
+untouched. To use Groq instead, set two more lines in `.env` (also shown, commented out, in
+`.env.example`):
+
+```dotenv
+GROUNDTRUTH_GENERATION_PROVIDER=groq
+GROUNDTRUTH_GENERATION_MODEL=llama-3.3-70b-versatile
 ```
 
-To add Groq, Gemini or OpenAI:
+This overrides `generation.provider` and `generation.model` **at load time**, for every command,
+regardless of which `--config` you pass. Leave these two lines unset (or commented out) and
+everything behaves exactly as before — Ollama, `qwen3:4b`, nothing changed.
 
-1. Write a client class in `generator.py` exposing the same two methods:
-   - `generate(question: str, chunks: list[RetrievedChunk]) -> str`
-   - `health_check() -> tuple[bool, str]`
-2. Add a branch in `build_generator()`.
-3. Set `provider:` in your configs.
+A couple of solid free-tier model choices (catalog: <https://console.groq.com/docs/models>):
 
-Reuse the existing `SYSTEM_PROMPT`, `USER_TEMPLATE` and `format_context()` — keeping the prompt
-identical across providers is what makes provider a controlled variable rather than a confound.
+| Model | Good for |
+|---|---|
+| `llama-3.3-70b-versatile` | Best quality; still fast — Groq's hardware makes model size a much smaller latency factor than on local CPU |
+| `llama-3.1-8b-instant` | Fastest, lightest quota usage per request |
 
-**Read API keys from environment variables, never hard-code them**, and keep them out of the
-config files, which get snapshotted into every run directory.
+### 8.3 Verify it
+
+```powershell
+.\.venv\Scripts\python.exe -m groundtruth.cli ask "What is multi-head attention?" --config configs\hybrid.yaml
+```
+
+With the env vars set, this now calls Groq instead of Ollama — same prompt, same retrieved
+chunks, same citation format, same refusal behaviour. Run the Bolivia refusal check too; it
+should still return exactly `INSUFFICIENT_CONTEXT`.
+
+### 8.4 How it's implemented
+
+`GroqGenerator` (in `src/groundtruth/generator.py`) is the second implementation of a small
+`Generator` protocol — the same "one interface, multiple implementations" pattern the retrievers
+use. It calls Groq's `/chat/completions` endpoint, which is OpenAI-compatible:
+
+```python
+class Generator(Protocol):
+    def generate(self, question: str, chunks: list[RetrievedChunk]) -> str: ...
+    def health_check(self) -> tuple[bool, str]: ...
+```
+
+It reuses the **exact same** `SYSTEM_PROMPT`, `USER_TEMPLATE`, `format_context()`, `REFUSAL` token
+and `_strip_thinking()` safety net as `OllamaGenerator` — the prompt a model sees is identical no
+matter which provider answers it, so provider is a clean switch, never a second variable smuggled
+into a retrieval experiment.
+
+Two things that differ from Ollama, both deliberate:
+
+- **The API key is never read from `GenerationConfig`.** That object gets written verbatim into
+  every `runs/<id>/config.yaml`. A secret living there would leak into every run directory.
+  `GroqGenerator` reads `os.environ["GROQ_API_KEY"]` directly, at the moment it's needed.
+- **Groq-specific failures get their own messages**: a missing key, a rejected (401) key, and a
+  429 rate limit (which backs off using the `Retry-After` header if Groq sends one, otherwise the
+  same exponential backoff Ollama uses).
+
+### 8.5 Adding a third provider
+
+Write a class with the same two methods, reuse the shared prompt constants, add one branch in
+`build_generator()`:
+
+```python
+def build_generator(cfg: GenerationConfig) -> Generator:
+    if cfg.provider == "ollama":
+        return OllamaGenerator(cfg)
+    if cfg.provider == "groq":
+        return GroqGenerator(cfg)
+    raise ValueError(f"Unsupported generation provider {cfg.provider!r}. Supported: 'ollama', 'groq'.")
+```
+
+**Read API keys from environment variables, never hard-code them**, and keep them off
+`GenerationConfig` for the reason above.
 
 ---
 
@@ -440,19 +520,43 @@ amortise this across all queries.
 ### Out of memory
 Unlikely with 31 GB, but if it happens use a smaller model or lower `num_ctx`.
 
+### `GROQ_API_KEY is not set`
+You haven't created `.env`, or it doesn't have the key in it. Copy `.env.example` to `.env` and
+paste in a key from <https://console.groq.com/keys>. Confirm `GROUNDTRUTH_GENERATION_PROVIDER=groq`
+is also set — without it, Ollama stays selected and `GROQ_API_KEY` is simply unused.
+
+### `Groq rejected GROQ_API_KEY (401)`
+The key is wrong, revoked, or was pasted with extra whitespace/quotes. Generate a fresh one at
+<https://console.groq.com/keys> and paste it into `.env` with no quotes around it.
+
+### `Model '...' not found on Groq`
+The model ID in `GROUNDTRUTH_GENERATION_MODEL` (or `generation.model` in a config) doesn't match
+Groq's current catalog. Check <https://console.groq.com/docs/models> — Groq's available models
+change over time.
+
+### `Groq rate limit (429) exceeded after retries`
+You've hit the free-tier request or token quota. `GroqGenerator` already backs off once using
+Groq's `Retry-After` header; a sustained 429 across a whole batch run usually means the quota is
+genuinely exhausted for the window. Wait, reduce `--limit` on the batch, or switch to
+`llama-3.1-8b-instant`, which tends to have a cheaper per-request quota cost.
+
+### Switched `GROUNDTRUTH_GENERATION_PROVIDER=groq` but it's still using Ollama
+`.env` is only read once, at Python process start (`load_dotenv()` runs on package import). If
+you edited `.env` in an already-open terminal, close it and open a new one — or explicitly
+`$env:GROUNDTRUTH_GENERATION_PROVIDER = "groq"` in the current PowerShell session instead.
+
 ---
 
 ## Summary
 
-| | |
-|---|---|
-| **Needed for retrieval?** | ❌ No — use `--no-generate` |
-| **Needed for Phase 3 faithfulness/relevance?** | ✅ Yes |
-| **Config changes required?** | None — it's already wired |
-| **Recommended model** | `qwen3:4b` (~2.6 GB) |
-| **Expected speed** | ~17 s per answer |
-| **Blocker on this machine** | GitHub release downloads return 403 |
-| **Simplest fix** | Download `OllamaSetup.exe` on another network and transfer it |
+| | Ollama | Groq |
+|---|---|---|
+| **Needed for retrieval?** | ❌ No — use `--no-generate` for either | |
+| **Config changes required?** | None — it's the on-disk default | None — flip 2 lines in `.env` |
+| **Recommended model** | `qwen3:4b` (~2.6 GB) | `llama-3.3-70b-versatile` |
+| **Expected speed** | ~17 s per answer (CPU) | seconds per answer (hosted) |
+| **Cost** | Free, fully offline | Free tier, needs an API key + network |
+| **Known blocker here** | GitHub release downloads return 403 on this network | none — verified against the live API |
 
-Once it's running, verify with the Bolivia question. `INSUFFICIENT_CONTEXT` means the grounding
-works, and Phase 3 will have a solid foundation to measure against.
+Whichever you use, verify with the Bolivia question first. `INSUFFICIENT_CONTEXT` means the
+grounding works, and Phase 3 will have a solid foundation to measure against.

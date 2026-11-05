@@ -1,4 +1,4 @@
-"""Retrieved context -> grounded answer, via a local Ollama model.
+"""Retrieved context -> grounded answer, via a local Ollama model or a free-tier API.
 
 Two prompt decisions matter for the evaluation that comes later:
 
@@ -8,12 +8,25 @@ Two prompt decisions matter for the evaluation that comes later:
 * **An explicit refusal token.** `INSUFFICIENT_CONTEXT` separates "the retriever
   failed" from "the generator hallucinated". Without it, both look like a wrong
   answer and the two failure modes in the problem statement become indistinguishable.
+
+Two providers are implemented, `OllamaGenerator` and `GroqGenerator`, behind one
+`Generator` protocol - the same pattern the retrievers use (see retrievers/base.py).
+`SYSTEM_PROMPT`, `USER_TEMPLATE`, `format_context()`, `REFUSAL` and `_strip_thinking()`
+are shared by both, so the prompt a model sees is identical regardless of which
+provider is generating - provider is a config switch, never a second variable smuggled
+into an experiment.
+
+Adding a third provider means adding one more class with the same two methods
+(`generate`, `health_check`) and one branch in `build_generator()` - never changing
+OllamaGenerator or GroqGenerator themselves.
 """
 
 from __future__ import annotations
 
+import os
 import re
 import time
+from typing import Protocol, runtime_checkable
 
 import requests
 
@@ -37,6 +50,19 @@ USER_TEMPLATE = """Context:
 Question: {question}
 
 Answer:"""
+
+
+@runtime_checkable
+class Generator(Protocol):
+    """The generation contract. Both providers implement exactly this."""
+
+    def generate(self, question: str, chunks: list[RetrievedChunk]) -> str:
+        """Return the model's answer, or REFUSAL if `chunks` is empty."""
+        ...
+
+    def health_check(self) -> tuple[bool, str]:
+        """(is_usable, message) - checked once before a batch run, and by `ask`."""
+        ...
 
 
 def format_context(chunks: list[RetrievedChunk]) -> str:
@@ -134,6 +160,137 @@ class OllamaGenerator:
         raise RuntimeError(f"Ollama generation failed after retries: {last_error}")
 
 
+GROQ_BASE_URL = "https://api.groq.com/openai/v1"
+GROQ_API_KEY_ENV = "GROQ_API_KEY"
+GROQ_KEYS_URL = "https://console.groq.com/keys"
+GROQ_MODELS_URL = "https://console.groq.com/docs/models"
+
+
+class GroqGenerator:
+    """Thin client over Groq's OpenAI-compatible /chat/completions endpoint.
+
+    Deliberately parallel to OllamaGenerator - same SYSTEM_PROMPT, USER_TEMPLATE,
+    REFUSAL and _strip_thinking() safety net - so swapping `generation.provider`
+    between "ollama" and "groq" changes nothing else about what the model is asked.
+
+    Why the API key is never read from `GenerationConfig`: that dataclass gets
+    serialised verbatim into every run's `runs/<id>/config.yaml` (see pipeline.py).
+    A secret living there would leak into every run directory, and potentially into
+    git if `runs/` were ever un-ignored. The key is read from the environment - via
+    `.env` and python-dotenv, see `.env.example` - at the moment it's needed, and
+    never stored on the config object.
+    """
+
+    def __init__(self, cfg: GenerationConfig) -> None:
+        self.cfg = cfg
+        self.url = f"{GROQ_BASE_URL}/chat/completions"
+
+    @staticmethod
+    def _api_key() -> str | None:
+        return os.environ.get(GROQ_API_KEY_ENV)
+
+    def health_check(self) -> tuple[bool, str]:
+        """Verify a key is present, Groq is reachable, and the model exists."""
+        api_key = self._api_key()
+        if not api_key:
+            return False, (
+                f"{GROQ_API_KEY_ENV} is not set. Copy .env.example to .env and paste "
+                f"your key from {GROQ_KEYS_URL}."
+            )
+
+        try:
+            response = requests.get(
+                f"{GROQ_BASE_URL}/models",
+                headers={"Authorization": f"Bearer {api_key}"},
+                timeout=10,
+            )
+        except requests.RequestException as exc:
+            return False, f"Groq API not reachable: {exc}"
+
+        if response.status_code == 401:
+            return False, f"{GROQ_API_KEY_ENV} was rejected (401). Check the key at {GROQ_KEYS_URL}."
+        try:
+            response.raise_for_status()
+        except requests.HTTPError as exc:
+            return False, f"Groq API error: {exc}"
+
+        models = [m.get("id", "") for m in response.json().get("data", [])]
+        if self.cfg.model not in models:
+            return False, (
+                f"Model {self.cfg.model!r} not found on Groq. Available: {models or 'none'}. "
+                f"See {GROQ_MODELS_URL} for current model IDs."
+            )
+        return True, "ok"
+
+    def generate(self, question: str, chunks: list[RetrievedChunk]) -> str:
+        if not chunks:
+            return REFUSAL
+
+        api_key = self._api_key()
+        if not api_key:
+            raise RuntimeError(
+                f"{GROQ_API_KEY_ENV} is not set. Copy .env.example to .env and paste your key "
+                f"from {GROQ_KEYS_URL}."
+            )
+
+        payload = {
+            "model": self.cfg.model,
+            "messages": [
+                {"role": "system", "content": SYSTEM_PROMPT},
+                {
+                    "role": "user",
+                    "content": USER_TEMPLATE.format(
+                        context=format_context(chunks), question=question
+                    ),
+                },
+            ],
+            "temperature": self.cfg.temperature,
+            "seed": self.cfg.seed,  # best-effort determinism; Groq does not guarantee it
+            "max_tokens": self.cfg.num_predict,
+            "stream": False,
+        }
+        headers = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
+
+        last_error: Exception | None = None
+        for attempt in range(self.cfg.max_retries + 1):
+            try:
+                response = requests.post(
+                    self.url, headers=headers, json=payload, timeout=self.cfg.timeout_s
+                )
+                if response.status_code == 401:
+                    raise RuntimeError(
+                        f"Groq rejected {GROQ_API_KEY_ENV} (401). Check the key at {GROQ_KEYS_URL}."
+                    )
+                if response.status_code == 429:
+                    if attempt < self.cfg.max_retries:
+                        wait = float(response.headers.get("Retry-After", 2**attempt))
+                        time.sleep(wait)
+                        continue
+                    raise RuntimeError(
+                        "Groq rate limit (429) exceeded after retries. Check your free-tier "
+                        "quota, or slow down the batch (fewer queries / add a delay)."
+                    )
+                response.raise_for_status()
+
+                content = response.json()["choices"][0]["message"]["content"]
+                # Groq's own chat models don't emit <think> blocks, but if this is
+                # ever pointed at a reasoning-capable model hosted on Groq (e.g. a
+                # qwen3 variant), the same truncation failure mode as Ollama applies.
+                answer = _strip_thinking(content)
+                if not answer:
+                    raise RuntimeError(
+                        "Model produced no answer after removing its reasoning trace "
+                        f"(max_tokens={self.cfg.num_predict}). Raise generation.num_predict."
+                    )
+                return answer
+            except requests.RequestException as exc:
+                last_error = exc
+                if attempt < self.cfg.max_retries:
+                    time.sleep(2**attempt)
+
+        raise RuntimeError(f"Groq generation failed after retries: {last_error}")
+
+
 _THINK_BLOCK_RE = re.compile(r"<think>.*?</think>", re.DOTALL | re.IGNORECASE)
 _THINK_OPEN_RE = re.compile(r"<think>", re.IGNORECASE)
 
@@ -155,9 +312,16 @@ def _strip_thinking(text: str) -> str:
     return cleaned.strip()
 
 
-def build_generator(cfg: GenerationConfig) -> OllamaGenerator:
-    if cfg.provider != "ollama":
-        raise ValueError(
-            f"Unsupported generation provider {cfg.provider!r}. Only 'ollama' is implemented."
-        )
-    return OllamaGenerator(cfg)
+def build_generator(cfg: GenerationConfig) -> Generator:
+    """Construct the generator named by `cfg.provider`.
+
+    Mirrors `retrievers.build_retriever()`: one factory, one branch per
+    implementation, nothing else in the pipeline needs to know which provider it got.
+    """
+    if cfg.provider == "ollama":
+        return OllamaGenerator(cfg)
+    if cfg.provider == "groq":
+        return GroqGenerator(cfg)
+    raise ValueError(
+        f"Unsupported generation provider {cfg.provider!r}. Supported: 'ollama', 'groq'."
+    )

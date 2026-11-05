@@ -16,6 +16,8 @@ rank-bm25>=0.2.2
 # that perform TLS inspection, where certifi's bundle lacks the proxy's root CA and
 # every huggingface.co model download fails with CERTIFICATE_VERIFY_FAILED.
 truststore>=0.10
+# Loads .env (GROQ_API_KEY, provider switch) - see .env.example
+python-dotenv>=1.0
 numpy>=1.26
 pyyaml>=6.0
 requests>=2.31

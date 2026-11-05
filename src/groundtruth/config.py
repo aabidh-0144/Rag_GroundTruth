@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any
@@ -144,15 +145,66 @@ def _merge(default: Any, override: dict[str, Any] | None) -> Any:
     return default
 
 
+# Free-tier model recommended for each alternate provider, used only as a fallback
+# when the environment switches `provider` without also giving an explicit `model`.
+# Verified 2026-09-28 against a real Groq free-tier key: fastest of the available
+# chat models, correctly followed the "[1]"-style citation instruction, and produced
+# clean ASCII output (a couple of the other chat models on that key's catalog used
+# typographic Unicode punctuation instead). Groq's free-tier catalog changes over
+# time - re-check https://console.groq.com/docs/models if this stops working.
+_PROVIDER_DEFAULT_MODELS = {"groq": "qwen/qwen3.8-27b"}
+
+
+def apply_generation_env_overrides(cfg: Config) -> None:
+    """Let the environment (typically a local `.env`, see `.env.example`) swap the
+    generator without editing any config file.
+
+    This exists so the four experiment configs can keep `provider: ollama` as their
+    on-disk, checked-in default - "the existing logic keeps working" - while a single
+    `.env` line flips every run to Groq for a quick test:
+
+        GROUNDTRUTH_GENERATION_PROVIDER=groq
+        GROUNDTRUTH_GENERATION_MODEL=qwen/qwen3.8-27b
+
+    The *resolved* config (post-override) is what gets written into
+    `runs/<id>/config.yaml`, so a run is still fully self-describing - you can always
+    see which provider actually produced it, even though the source YAML disagrees.
+    """
+    provider = os.environ.get("GROUNDTRUTH_GENERATION_PROVIDER")
+    model = os.environ.get("GROUNDTRUTH_GENERATION_MODEL")
+
+    if provider and provider != cfg.generation.provider and not model:
+        # Switching provider with no explicit model would otherwise leave whatever
+        # model name the YAML had (an Ollama-style tag like "qwen3:4b") pointed at a
+        # provider that has never heard of it. Only kicks in when the caller didn't
+        # already make an explicit choice.
+        fallback = _PROVIDER_DEFAULT_MODELS.get(provider)
+        if fallback:
+            cfg.generation.model = fallback
+
+    if provider:
+        cfg.generation.provider = provider
+    if model:
+        cfg.generation.model = model
+
+
 def load_config(path: str | Path) -> Config:
     """Load a YAML experiment config, falling back to defaults for absent keys."""
     data = yaml.safe_load(Path(path).read_text(encoding="utf-8")) or {}
     cfg = Config()
     _merge(cfg, data)
+    apply_generation_env_overrides(cfg)
 
     valid = {"dense", "bm25", "hybrid", "hybrid_rerank"}
     if cfg.retrieval.strategy not in valid:
         raise ValueError(
             f"Unknown retrieval strategy {cfg.retrieval.strategy!r}; expected one of {sorted(valid)}"
+        )
+
+    valid_providers = {"ollama", "groq"}
+    if cfg.generation.provider not in valid_providers:
+        raise ValueError(
+            f"Unknown generation provider {cfg.generation.provider!r}; "
+            f"expected one of {sorted(valid_providers)}"
         )
     return cfg

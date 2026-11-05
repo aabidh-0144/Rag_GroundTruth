@@ -137,7 +137,7 @@ def check_generation(cfg: Config) -> None:
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--config", default="configs/hybrid_rerank.yaml")
-    parser.add_argument("--generate", action="store_true", help="also test Ollama generation")
+    parser.add_argument("--generate", action="store_true", help="also test the active generation provider (Ollama or Groq, per .env/config)")
     args = parser.parse_args()
 
     cfg = load_config(args.config)
