@@ -32,7 +32,7 @@ end-to-end against Groq's real API (health check, a live 401 against a bad key) 
 practical way to test generation from this machine while Ollama stays blocked. See
 [§8](#8-using-groq-instead-of-or-alongside-ollama).
 
-[Jump to Ollama workarounds →](#option-b-network-blocked-workarounds)
+[Jump to Ollama workarounds →](#option-b-network-blocked--workarounds)
 
 ---
 

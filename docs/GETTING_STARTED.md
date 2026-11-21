@@ -161,10 +161,11 @@ Expect:
 
 ```
 ...................................................................  [100%]
-87 passed in 0.20s
+208 passed, 3 skipped in 33s
 ```
 
-These use fake tokenizers and stub retrievers — no models downloaded, no network needed.
+These use fake tokenizers, stub retrievers and a fake judge LLM — no network needed. The 3
+skipped tests are opt-in live tests that need a real judge model (see `docs/EVALUATION.md` §13).
 
 ---
 
@@ -483,6 +484,39 @@ Add `--generate` to also exercise whichever generator is currently active (Ollam
 
 ---
 
+## Step 16 — Evaluate the answers
+
+Once you have a run **with answers** (Step 14 without `--no-generate`), score it:
+
+```powershell
+# Mode 1: LLM-judge faithfulness, answer relevance, context relevance - no references needed
+.\.venv\Scripts\python.exe -m groundtruth.cli eval reference-free --run <run_id>
+
+# Mode 2: Ragas metrics
+.\.venv\Scripts\python.exe -m groundtruth.cli eval ragas --run <run_id>
+
+# or do everything with clicks
+.\.venv\Scripts\python.exe -m groundtruth.cli ui
+```
+
+`<run_id>` is a folder name under `runs\`. The judge defaults to the same Ollama model you
+generate with. Results land in `evals\<evaluation_id>\`; list them with
+`groundtruth.cli eval history`.
+
+To evaluate against reference answers without writing any by hand, generate a synthetic
+dataset with Ragas, review it, and evaluate against it:
+
+```powershell
+.\.venv\Scripts\python.exe -m groundtruth.cli eval generate-dataset --size 5
+.\.venv\Scripts\python.exe -m groundtruth.cli eval review-dataset <dataset_id>
+.\.venv\Scripts\python.exe -m groundtruth.cli eval ragas --dataset <dataset_id> --generate-answers --config configs\hybrid.yaml --metrics context_recall,answer_correctness
+```
+
+Judging is slow on a CPU (tens of seconds per call). Everything about metrics, scoring rules,
+the judge model and the app is in [`EVALUATION.md`](EVALUATION.md).
+
+---
+
 ## Command reference
 
 | Command | Purpose | Speed |
@@ -492,6 +526,9 @@ Add `--generate` to also exercise whichever generator is currently active (Ollam
 | `index --config X` | Chunks → Chroma + BM25 | ~6 chunks/s |
 | `ask "Q" --config X` | One question, interactive | ms to seconds |
 | `run --config X --queries F` | Batch → `runs/` | depends on strategy |
+| `eval reference-free \| ragas --run R` | Score a run → `evals/` | tens of seconds per judge call |
+| `eval generate-dataset` | Synthetic Q/A dataset → `datasets/` | slow: many judge calls |
+| `ui` | Streamlit app | — |
 
 Useful flags: `--force` (ingest), `--no-generate`, `--warmup` (ask), `--limit N` (run).
 
@@ -565,5 +602,5 @@ Near-empty text means you need OCR before this pipeline can use it.
    `dense` against `hybrid` on rare exact terms.
 3. **Optionally enable generation** — Step 12 above, or the full [`OLLAMA_SETUP.md`](OLLAMA_SETUP.md)
    for depth on either Ollama or Groq.
-4. **Move to Phase 2** — building the golden dataset, which is what turns this from a RAG system
-   into an evaluation framework.
+4. **Evaluate** — Step 16, then [`EVALUATION.md`](EVALUATION.md). Generate a synthetic dataset,
+   review it, and commit the reviewed version as your regression suite.

@@ -1,0 +1,37 @@
+# Evaluation settings (Phase 3). Read by `groundtruth.cli eval ...` and the UI.
+# Unknown keys are errors, same as experiment configs.
+
+judge:
+  # Judge with the same provider/model the RAG system generates with - read from
+  # this config, including its .env overrides. Fully local with Ollama.
+  inherit_from_generation: true
+  generation_config: configs/hybrid.yaml
+  # Set these to judge with a different model instead, e.g. a second local Ollama
+  # model from another family, which avoids a model grading its own answers.
+  # Env overrides: GROUNDTRUTH_JUDGE_PROVIDER / GROUNDTRUTH_JUDGE_MODEL.
+  provider: null
+  model: null
+  temperature: 0.0
+  num_ctx: 8192        # contexts + answer + a JSON verdict
+  num_predict: 2048
+  think: false
+  timeout_s: 300       # local CPU judging is slow
+  max_retries: 2
+
+# Samples scored in parallel. Keep 1 for a single local Ollama model.
+concurrency: 1
+
+reference_free:        # Mode 1
+  metrics: [faithfulness, answer_relevance, context_relevance]
+
+ragas:                 # Mode 2 - reference-free defaults; add reference-based ones
+  metrics: [faithfulness, response_relevancy, context_precision]
+  # available: faithfulness, response_relevancy, context_precision,
+  #   context_precision_with_reference, context_recall, answer_correctness,
+  #   answer_similarity   (the last four need a ground_truth)
+  embedding_model: BAAI/bge-small-en-v1.5
+  timeout_s: 300
+
+synthetic:             # eval generate-dataset
+  size: 5
+  distribution: {factual: 0.5, reasoning: 0.25, multihop: 0.25}

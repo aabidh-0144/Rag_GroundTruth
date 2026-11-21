@@ -51,9 +51,9 @@ and repeatably, instead of you reading answers one by one and forming an impress
 | Phase | Scope | Status |
 |-------|-------|--------|
 | **1** | **The RAG system under test** | ✅ **Complete — this document** |
-| 2 | Golden dataset (~100 Q/A pairs over ~25 papers) | Not started |
-| 3 | Metrics: Recall@K, MRR, nDCG, Faithfulness, Answer Relevance, p95 | Not started |
-| 4 | Experiment comparison report | Not started |
+| 2 | Golden dataset (~100 Q/A pairs over ~25 papers) | Tooling done (Ragas synthetic generation + human review); dataset not yet generated |
+| 3 | Evaluation | LLM-judge + Ragas metrics done — see [`EVALUATION.md`](EVALUATION.md). Rank metrics (Recall@K, MRR, nDCG) not yet |
+| 4 | Experiment comparison report | Side-by-side comparison in the app; report not started |
 
 **Phase 1 builds the thing that phases 2–4 will measure.** Everything in this document is about
 making that measurable later — which is why some choices look stricter than a normal RAG demo.
@@ -140,7 +140,8 @@ Rag_GroundTruth/
 │   ├── dense.yaml              Experiment A — vector search only
 │   ├── hybrid.yaml             Experiment B — BM25 + vector, fused with RRF
 │   ├── hybrid_rerank.yaml      Experiment C — hybrid + MiniLM-L6 cross-encoder
-│   └── hybrid_rerank_large.yaml Experiment D — hybrid + bge-reranker-base (slow, stronger)
+│   ├── hybrid_rerank_large.yaml Experiment D — hybrid + bge-reranker-base (slow, stronger)
+│   └── evaluation.yaml         Phase 3 settings: judge model, metrics, dataset size
 │
 ├── data/
 │   ├── raw/                    ⭐ YOU PUT PDFs HERE            (gitignored)
@@ -160,6 +161,12 @@ Rag_GroundTruth/
 │       ├── results.jsonl
 │       └── manifest.json
 │
+├── evals/                      Evaluation results (Phase 3)      (gitignored)
+│   └── <evaluation_id>/        config.yaml, results.jsonl, summary.json
+│
+├── datasets/                   Synthetic + reviewed datasets     (tracked)
+│   └── <dataset_id>/           samples.jsonl, manifest.json
+│
 ├── src/groundtruth/            ⭐ THE CODE
 │   ├── __init__.py       (42)  Package init + truststore TLS fix + .env loading
 │   ├── schemas.py       (142)  Core data types + chunk ID function
@@ -168,9 +175,10 @@ Rag_GroundTruth/
 │   ├── chunking.py      (339)  Document → Chunks  ← most complex file
 │   ├── embedder.py       (75)  Text → vectors (bge wrapper)
 │   ├── index.py         (167)  Chunks → Chroma + BM25
-│   ├── generator.py     (327)  Context → answer (Ollama + Groq clients + shared prompt)
+│   ├── llm.py           (274)  Provider transport (Ollama/Groq) — shared by generator AND judges
+│   ├── generator.py     (130)  Context → answer: the grounded RAG prompt over llm.py
 │   ├── pipeline.py      (180)  End-to-end orchestration, run artifacts
-│   ├── cli.py           (192)  Command-line interface
+│   ├── cli.py           (197)  Command-line interface (registers `eval ...` and `ui`)
 │   │
 │   ├── retrievers/             ⭐ ONE FILE PER STRATEGY
 │   │   ├── __init__.py   (51)  Factory: config → retriever
@@ -180,16 +188,29 @@ Rag_GroundTruth/
 │   │   ├── hybrid.py     (88)  RRF fusion
 │   │   └── rerank.py     (76)  Cross-encoder wrapper
 │   │
-│   └── utils/
-│       ├── io.py         (64)  JSON/JSONL, slugify, sha256
-│       └── timing.py     (44)  Per-stage latency timer
+│   ├── utils/
+│   │   ├── io.py         (64)  JSON/JSONL, slugify, sha256
+│   │   └── timing.py     (44)  Per-stage latency timer
+│   │
+│   ├── evaluation/             ⭐ PHASE 3 — full map in EVALUATION.md §2
+│   │   ├── orchestrator.py     runs an evaluation, either mode
+│   │   ├── aggregate.py        the scoring rules
+│   │   ├── reference_free/     Mode 1: one file per judge metric
+│   │   ├── ragas_mode/         Mode 2: Ragas metrics
+│   │   └── synthetic/          Ragas synthetic datasets + human review
+│   │
+│   └── ui/                     Streamlit app: app.py + views/ (one file per page)
 │
-├── tests/                      71 unit tests, all fakes, runs in <1s
+├── tests/                      208 tests, all fakes, ~30s (+3 opt-in live tests)
 │   ├── conftest.py       (52)  Fake tokenizer + sample paper fixture
 │   ├── test_chunking.py (179)  ⭐ Includes the char-span invariant test
 │   ├── test_retrievers.py(214) RRF maths, ranking, config integrity
 │   ├── test_ingest.py   (135)  Boilerplate/reference stripping
-│   └── test_generator.py(413)  Prompt building, refusal, retries, env override (Ollama and Groq stubbed at the HTTP boundary)
+│   ├── test_generator.py(433)  Prompt building, refusal, retries, env override (Ollama and Groq stubbed at the HTTP boundary)
+│   ├── test_llm.py       (72)  Shared transport: JSON mode, judge-aware errors
+│   ├── eval_fakes.py     (82)  FakeJudge / FakeRagasMetric for the eval tests
+│   ├── test_eval_*.py          Mode 1, Mode 2, datasets, scoring, store, CLI (see EVALUATION.md §13)
+│   └── test_ui_smoke.py  (56)  Every Streamlit page renders; review persists
 │
 ├── scripts/
 │   └── smoke.py         (167)  End-to-end check against REAL models and indexes
@@ -824,7 +845,7 @@ this quality-vs-latency tradeoff is one of the things this framework exists to d
 
 Two complementary layers — deliberately split.
 
-### Unit tests — `pytest` · 87 tests · <1 second
+### Unit tests — `pytest` · 208 tests · ~30 seconds
 
 Fast and hermetic. A **fake whitespace tokenizer** and **stub retrievers** mean no model
 downloads and no index on disk. These test *logic*: span arithmetic, boundary conditions, fusion
@@ -889,11 +910,13 @@ behind a `Generator` protocol (same pattern as `Retriever`). Switch between them
 `.env` (`GROUNDTRUTH_GENERATION_PROVIDER=groq`) without editing any config file — see
 `.env.example` and `OLLAMA_SETUP.md` §7.
 
-To add a third: write a class exposing the same `generate()` / `health_check()` methods, reusing
-the shared `SYSTEM_PROMPT`, `USER_TEMPLATE`, `format_context()` and `_strip_thinking()` so the
-prompt stays identical across providers, then add one branch in `build_generator()`. Read any API
-key from an environment variable inside the class itself — never store it on `GenerationConfig`,
-which gets serialised into every run's `config.yaml`.
+The HTTP transport for each provider lives in `llm.py` (`OllamaChatClient`, `GroqChatClient`),
+shared by the generator and the evaluation judges; `generator.py` only adds the RAG prompt.
+To add a third provider: write a client in `llm.py` with `chat(system, user, json_mode=...)` and
+`health_check()`, add one branch in `build_llm_client()` and a thin generator class in
+`generator.py`. The generator *and* the judges then support it. Read any API key from an
+environment variable inside the client — never store it on `GenerationConfig`, which gets
+serialised into every run's and every evaluation's `config.yaml`.
 
 ---
 
@@ -908,6 +931,10 @@ which gets serialised into every run's `config.yaml`.
 | `rank-bm25` | Lexical index |
 | `truststore` | OS certificate store — required on TLS-inspecting corporate networks |
 | `python-dotenv` | Loads `.env` (`GROQ_API_KEY`, provider switch) — see `.env.example` |
+| `pydantic` | Validates evaluation inputs and judge replies |
+| `ragas` (0.4.x) | Mode 2 metrics + synthetic datasets. Pulls in LangChain, imported only in `evaluation/ragas_mode/` and `evaluation/synthetic/` |
+| `rapidfuzz` | Required by Ragas dataset generation but not declared by Ragas |
+| `streamlit` | The evaluation app (`groundtruth.cli ui`) |
 | `numpy`, `pyyaml`, `requests` | Core |
 | `pytest` | Tests |
 

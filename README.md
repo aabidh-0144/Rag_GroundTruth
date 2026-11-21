@@ -17,19 +17,21 @@ answer two questions automatically, and repeatably:
 | **[docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)** | **Start here.** What was built and why: folder-by-folder guide, the full RAG pipeline (chunking method, embedding model, retrieval strategies), data formats, design invariants, measured performance |
 | [docs/GETTING_STARTED.md](docs/GETTING_STARTED.md) | Step-by-step setup and run instructions, from creating a venv to producing experiment results |
 | [docs/OLLAMA_SETUP.md](docs/OLLAMA_SETUP.md) | Installing Ollama and enabling answer generation (optional — retrieval works without it) |
+| **[docs/EVALUATION.md](docs/EVALUATION.md)** | Evaluating the RAG system: Mode 1 (reference-free LLM judge), Mode 2 (Ragas), synthetic datasets + human review, scoring rules, CLI and Streamlit app |
 
 ## Status
 
 | Phase | Scope | Status |
 |-------|-------|--------|
 | 1 | The RAG system under test | **done** |
-| 2 | Golden dataset (~100 Q/A pairs) | not started |
-| 3 | Evaluation metrics (Recall@K, MRR, nDCG, faithfulness, relevance, p95) | not started |
-| 4 | Experiment comparison report | not started |
+| 2 | Golden dataset (~100 Q/A pairs) | **tooling done**: Ragas synthetic generation + human review, span-anchored labels. The dataset itself is yet to be generated and reviewed. |
+| 3 | Evaluation metrics | **LLM-judge + Ragas done** (faithfulness, answer/context relevance, context precision/recall, answer correctness). **Not yet:** rank metrics Recall@K, MRR, nDCG against the span-labelled dataset |
+| 4 | Experiment comparison report | side-by-side comparison in the app; written report not started |
 
-Phase 1 builds the system that phases 2-4 will measure. It is deliberately transparent - no
+Phase 1 builds the system that phases 2-4 measure. The RAG system is deliberately transparent - no
 LangChain, no LlamaIndex - because an evaluation framework whose retrieval internals you cannot
-inspect is not worth much.
+inspect is not worth much. Ragas (which uses LangChain internally) is the one exception, and it
+is confined to the evaluation's Ragas modules.
 
 ## Architecture
 
@@ -136,14 +138,15 @@ These are not style preferences; breaking them invalidates the evaluation.
 ## Testing
 
 ```bash
-.venv/Scripts/python.exe -m pytest              # 52 unit tests, fakes only, <1s
+.venv/Scripts/python.exe -m pytest              # 208 tests, fakes only, ~30s, no network
 .venv/Scripts/python.exe scripts/smoke.py       # end-to-end against real models and indexes
 .venv/Scripts/python.exe scripts/smoke.py --generate   # also exercises Ollama
+$env:GROUNDTRUTH_LIVE_TESTS = "1"; .venv/Scripts/python.exe -m pytest -m live   # real judge
 ```
 
-The unit tests use a fake tokenizer and stub retrievers so they stay fast and hermetic.
-`scripts/smoke.py` is the counterpart that exercises what fakes cannot: real PDF parsing, the
-real tokenizer, Chroma persistence, and the cross-encoder.
+The unit tests use a fake tokenizer, stub retrievers and a fake judge LLM so they stay fast and
+hermetic. `scripts/smoke.py` and the opt-in `live` tests exercise what fakes cannot: real PDF
+parsing, the real tokenizer, Chroma persistence, the cross-encoder, and a real judge model.
 
 ## Layout
 
@@ -155,8 +158,15 @@ src/groundtruth/
   embedder.py        bge wrapper enforcing the query/document asymmetry
   index.py           Chroma + BM25 construction, fingerprinting
   retrievers/        dense, bm25, hybrid (RRF), rerank - one file each
-  generator.py       Ollama client + grounded prompt
+  llm.py             provider transport (Ollama/Groq) shared by generator and judges
+  generator.py       grounded RAG prompt over llm.py
   pipeline.py        end-to-end orchestration and run artifacts
-  cli.py             ingest | chunk | index | ask | run
-data/, store/, runs/ gitignored; all regenerable from data/raw/ + configs
+  cli.py             ingest | chunk | index | ask | run | eval ... | ui
+  evaluation/        Phase 3 - see docs/EVALUATION.md
+    reference_free/    Mode 1: faithfulness, answer relevance, context relevance
+    ragas_mode/        Mode 2: Ragas metrics
+    synthetic/         Ragas synthetic datasets + human review
+  ui/                Streamlit app: Evaluate | Results | Datasets
+data/, store/, runs/, evals/   gitignored; regenerable from data/raw/ + configs
+datasets/            tracked: reviewed datasets are worth committing
 ```

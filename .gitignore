@@ -15,6 +15,7 @@ data/raw/*
 data/processed/
 store/
 runs/
+evals/
 
 # Model caches
 .cache/

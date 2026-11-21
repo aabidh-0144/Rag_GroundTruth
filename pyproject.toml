@@ -17,5 +17,12 @@ where = ["src"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-pythonpath = ["src"]
+pythonpath = ["src", "tests"]
 addopts = "-q"
+markers = [
+    "live: calls a real local judge LLM; skipped unless GROUNDTRUTH_LIVE_TESTS=1",
+]
+filterwarnings = [
+    # Raised inside Ragas' own imports (ragas.llms.base), not by this project.
+    "ignore:`langchain-community` is being sunset:DeprecationWarning",
+]

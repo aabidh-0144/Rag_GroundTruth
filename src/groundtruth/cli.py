@@ -179,6 +179,11 @@ def main(argv: list[str] | None = None) -> int:
     p_run.add_argument("--no-generate", action="store_true", help="retrieval only")
     p_run.set_defaults(func=cmd_run)
 
+    # Phase 3 evaluation commands live in their own module (`eval ...` and `ui`).
+    from groundtruth.evaluation.commands import register as register_eval_commands
+
+    register_eval_commands(sub)
+
     args = parser.parse_args(argv)
 
     try:

@@ -15,12 +15,12 @@ Prefer simple, reproducible, minimal-infrastructure solutions.
 
 | Phase | Scope | Status |
 |-------|-------|--------|
-| 1 | **The RAG system under test** — ingest, chunk, index, retrieve, generate | in progress |
-| 2 | **Golden dataset** — ~100 Q/A pairs over ~25 research papers | not started |
-| 3 | **Evaluation layer** — Recall@K, MRR, nDCG, Faithfulness, Answer Relevance, p95 latency | not started |
-| 4 | **Experiment comparison** — Dense vs Hybrid vs Hybrid+Reranker report | not started |
+| 1 | **The RAG system under test** — ingest, chunk, index, retrieve, generate | complete |
+| 2 | **Golden dataset** — ~100 Q/A pairs over ~25 research papers | tooling complete (Ragas synthetic generation + human review); dataset itself not yet generated |
+| 3 | **Evaluation layer** | LLM-judge (Mode 1) + Ragas (Mode 2) complete — see docs/EVALUATION.md. **Not built yet:** rank metrics Recall@K, MRR, nDCG against span-labelled datasets |
+| 4 | **Experiment comparison** — Dense vs Hybrid vs Hybrid+Reranker report | side-by-side compare in the Streamlit app; report not started |
 
-Phase 1 is the current work. Do not start phase 2 or 3 code unless asked.
+Likely next work: Recall@K / MRR / nDCG using `reference_spans` from reviewed datasets.
 
 ## Hardware constraints (non-negotiable)
 
@@ -40,6 +40,9 @@ Phase 1 is the current work. Do not start phase 2 or 3 code unless asked.
 | Generator | Ollama at `localhost:11434`, model `qwen3:4b` (fallback `llama3.2:3b`) |
 | PDF parsing | `pymupdf4llm.to_markdown(page_chunks=True)` |
 | Python | `.venv` at repo root, Python 3.13 |
+| Judge (eval) | Same provider/model as generation by default (`configs/evaluation.yaml`, `GROUNDTRUTH_JUDGE_*`). **User wants local Ollama only — no Groq, no paid LLMs.** |
+| Eval framework | Ragas 0.4.x (`ragas.metrics.collections` API only — the `ragas.metrics` imports are deprecated) |
+| Eval UI | Streamlit (`groundtruth.cli ui`) |
 
 Do not swap these without being asked. Config-level changes (chunk size, k, fusion params)
 are fine and expected; stack-level changes are not.
@@ -63,6 +66,13 @@ are fine and expected; stack-level changes are not.
    `total_ms`) from day one, because p95 is a phase-3 deliverable.
 7. **Runs record a corpus fingerprint.** A run whose fingerprint disagrees with the index
    must fail loudly rather than produce an incomparable result.
+8. **A missing score is never 0.** Every metric result is `success | failed | skipped`;
+   failed/skipped are excluded from means and counted. `overall_score` is null when a
+   requested metric applied but never succeeded. All rules live in `evaluation/aggregate.py`.
+9. **Synthetic data is never ground truth until a human verifies it.** Generated samples
+   start `origin: synthetic`, `verification_status: unverified`; rejected samples are never
+   evaluated; edits keep the original and reset to unverified. Never fabricate a ground truth —
+   reference-based metrics without one are `skipped`.
 
 ## Environment facts learned while building (do not rediscover these)
 
@@ -72,7 +82,18 @@ are fine and expected; stack-level changes are not.
 - **GitHub release assets are blocked (HTTP 403).** This means Ollama cannot be installed on
   this machine via winget or a direct download - both redirect to
   `release-assets.githubusercontent.com`. PyPI, Hugging Face and arXiv are all reachable.
-  Generation is therefore untested end-to-end; `generator.py` is covered by unit tests only.
+  The user runs Ollama (a qwen 14b model) on a separate personal laptop instead.
+- **This machine's `.env` sets `GROUNDTRUTH_GENERATION_PROVIDER=groq`** (from an earlier
+  session). The judge inherits generation settings, so evaluations run *here* use Groq unless
+  that line is commented out or `GROUNDTRUTH_JUDGE_PROVIDER=ollama` is set. The user does not
+  want Groq used for real work — never send their corpus to it without asking.
+- **Ragas 0.4.4 gotchas (verified against the installed package):** the legacy
+  `ragas.embeddings.base.HuggingfaceEmbeddings` cannot be instantiated (abstract async
+  methods) — use the modern `ragas.embeddings.HuggingFaceEmbeddings` for metrics AND testset
+  transforms; testset generation needs `rapidfuzz`, which Ragas does not declare;
+  `RunConfig` defaults to 16 workers (we pass `max_workers=concurrency`); Ragas posts usage
+  analytics unless `RAGAS_DO_NOT_TRACK=true` (set by `ragas_mode/adapters.import_ragas()`).
+  `tests/test_eval_ragas.py` checks the metric registry against the installed Ragas API.
 - **Measured CPU latency** (i7-1185G7, warm, 50 rerank candidates, retrieval only):
   dense ~22ms, hybrid ~24ms, hybrid+MiniLM-L6 ~4.4s, hybrid+bge-reranker-base ~29s.
   The reranker dominates; this is real, and worth reporting rather than hiding.
@@ -91,11 +112,15 @@ data/processed/documents/*.json     normalized text + page char offsets
 data/processed/chunks.jsonl         canonical chunks
 store/chroma/ , store/bm25.pkl      indexes
 runs/<run_id>/                      config.yaml, results.jsonl, manifest.json
-configs/{dense,hybrid,hybrid_rerank}.yaml
-src/groundtruth/                    package
+evals/<evaluation_id>/              config.yaml, results.jsonl (append-only), summary.json
+datasets/<dataset_id>/              samples.jsonl, manifest.json (tracked - commit reviewed ones)
+configs/{dense,hybrid,hybrid_rerank,hybrid_rerank_large}.yaml , configs/evaluation.yaml
+src/groundtruth/                    package; llm.py = provider transport shared by generator + judges
+src/groundtruth/evaluation/         Phase 3 - __init__.py is a map of the package
+src/groundtruth/ui/                 Streamlit app (app.py + views/ one file per page)
 ```
 
-`data/`, `store/`, `runs/` are gitignored — all regenerable from `data/raw/` + configs.
+`data/`, `store/`, `runs/`, `evals/` are gitignored — all regenerable from `data/raw/` + configs.
 
 ## Commands
 
@@ -105,7 +130,14 @@ src/groundtruth/                    package
 .venv/Scripts/python.exe -m groundtruth.cli index                        # chunks -> chroma + bm25
 .venv/Scripts/python.exe -m groundtruth.cli ask "question" --config configs/hybrid.yaml
 .venv/Scripts/python.exe -m groundtruth.cli run --config configs/dense.yaml --queries q.jsonl
-.venv/Scripts/python.exe -m pytest
+.venv/Scripts/python.exe -m groundtruth.cli eval reference-free --run <run_id>     # Mode 1
+.venv/Scripts/python.exe -m groundtruth.cli eval ragas --run <run_id>              # Mode 2
+.venv/Scripts/python.exe -m groundtruth.cli eval generate-dataset --size 5
+.venv/Scripts/python.exe -m groundtruth.cli eval review-dataset <dataset_id>
+.venv/Scripts/python.exe -m groundtruth.cli eval history | results <id>
+.venv/Scripts/python.exe -m groundtruth.cli ui                                     # Streamlit
+.venv/Scripts/python.exe -m pytest                     # ~30s, no network
+GROUNDTRUTH_LIVE_TESTS=1 .venv/Scripts/python.exe -m pytest -m live   # real judge / models
 ```
 
 ## Conventions
@@ -115,3 +147,10 @@ src/groundtruth/                    package
   existing one. That is how the experiment matrix stays clean.
 - Prefer stdlib and explicit code over frameworks. There is deliberately no LangChain /
   LlamaIndex here — the whole point is that retrieval internals stay inspectable.
+  **Exception:** Ragas (which depends on LangChain). Import it only inside
+  `evaluation/ragas_mode/` and `evaluation/synthetic/`, via `adapters.import_ragas()`.
+- **Structure for readability (user's explicit request):** one responsibility per file; one
+  Mode 1 metric per file; prompts only in `evaluation/prompts.py`; scoring rules only in
+  `evaluation/aggregate.py`; new eval metrics are a new class + registry entry, like retrievers.
+- The Streamlit app never scores anything itself; it launches `groundtruth.cli` subprocesses
+  and reads `evals/` and `datasets/`.

@@ -21,6 +21,21 @@ python-dotenv>=1.0
 numpy>=1.26
 pyyaml>=6.0
 requests>=2.31
+# Validates evaluation inputs and judge replies (already a transitive dependency
+# of chromadb and ragas; listed because evaluation code imports it directly).
+pydantic>=2.0
+
+# --- Evaluation (Phase 3) ---------------------------------------------------
+# Ragas pulls in LangChain. It is imported only inside
+# src/groundtruth/evaluation/ragas_mode/ and synthetic/ - the core RAG system and
+# Mode 1 never load it. Pinned to 0.4.x: the metrics API was reworked in 0.4 and
+# the code was verified against 0.4.4 (see ragas_mode/metrics.py).
+ragas>=0.4.4,<0.5
+# Needed by Ragas testset generation (string-overlap relationship builder) but not
+# declared as a Ragas dependency - without it generate-dataset fails at runtime.
+rapidfuzz>=3.0
+# Local UI: `groundtruth.cli ui`
+streamlit>=1.40
 
 # --- Dev -------------------------------------------------------------------
 pytest>=8.0
